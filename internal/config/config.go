@@ -31,16 +31,18 @@ type RecordingConfig struct {
 }
 
 type TranscriptionConfig struct {
-	Provider string `toml:"provider"`
-	APIKey   string `toml:"api_key"`
-	Language string `toml:"language"`
-	Model    string `toml:"model"`
+	Provider  string `toml:"provider"`
+	APIKey    string `toml:"api_key"`
+	Language  string `toml:"language"`
+	Model     string `toml:"model"`
+	ServerURL string `toml:"server_url"` // For local whisper.cpp server
 }
 
 type InjectionConfig struct {
 	Mode             string        `toml:"mode"`
 	RestoreClipboard bool          `toml:"restore_clipboard"`
 	WtypeTimeout     time.Duration `toml:"wtype_timeout"`
+	WtypeDelay       time.Duration `toml:"wtype_delay"`
 	ClipboardTimeout time.Duration `toml:"clipboard_timeout"`
 }
 
@@ -63,10 +65,11 @@ func (c *Config) ToRecordingConfig() recording.Config {
 
 func (c *Config) ToTranscriberConfig() transcriber.Config {
 	config := transcriber.Config{
-		Provider: c.Transcription.Provider,
-		APIKey:   c.Transcription.APIKey,
-		Language: c.Transcription.Language,
-		Model:    c.Transcription.Model,
+		Provider:  c.Transcription.Provider,
+		APIKey:    c.Transcription.APIKey,
+		Language:  c.Transcription.Language,
+		Model:     c.Transcription.Model,
+		ServerURL: c.Transcription.ServerURL,
 	}
 
 	// Check for API key in environment variables if not in config
@@ -87,6 +90,7 @@ func (c *Config) ToInjectionConfig() injection.Config {
 		Mode:             c.Injection.Mode,
 		RestoreClipboard: c.Injection.RestoreClipboard,
 		WtypeTimeout:     c.Injection.WtypeTimeout,
+		WtypeDelay:       c.Injection.WtypeDelay,
 		ClipboardTimeout: c.Injection.ClipboardTimeout,
 	}
 }
@@ -172,11 +176,22 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid model for groq-translation: %s (must be whisper-large-v3, turbo version not supported for translation)", c.Transcription.Model)
 		}
 
+	case "whisper-cpp":
+		if c.Transcription.ServerURL == "" {
+			return fmt.Errorf("whisper.cpp server URL required: set transcription.server_url in config (e.g., http://192.168.10.37:8025/inference)")
+		}
+
+		// Validate language code if provided (empty string means auto-detect)
+		if c.Transcription.Language != "" && !isValidLanguageCode(c.Transcription.Language) {
+			return fmt.Errorf("invalid transcription.language: %s (use empty string for auto-detect or ISO-639-1 codes like 'en', 'es', 'fr')", c.Transcription.Language)
+		}
+
 	default:
-		return fmt.Errorf("unsupported transcription.provider: %s (must be openai, groq-transcription, or groq-translation)", c.Transcription.Provider)
+		return fmt.Errorf("unsupported transcription.provider: %s (must be openai, groq-transcription, groq-translation, or whisper-cpp)", c.Transcription.Provider)
 	}
 
-	if c.Transcription.Model == "" {
+	// Model validation - not required for whisper-cpp (uses server's loaded model)
+	if c.Transcription.Provider != "whisper-cpp" && c.Transcription.Model == "" {
 		return fmt.Errorf("invalid transcription.model: empty")
 	}
 
@@ -289,16 +304,18 @@ func SaveDefaultConfig() error {
 
 # Speech Transcription Configuration
 [transcription]
-  provider = "openai"          # Transcription service: "openai", "groq-transcription", or "groq-translation"
+  provider = "openai"          # Transcription service: "openai", "groq-transcription", "groq-translation", or "whisper-cpp"
   api_key = ""                 # API key (or set OPENAI_API_KEY/GROQ_API_KEY environment variable)
   language = ""                # Language code (empty for auto-detect, "en", "it", "es", "fr", etc.)
-  model = "whisper-1"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3" or "whisper-large-v3-turbo"
+  model = "whisper-1"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3" or "whisper-large-v3-turbo" (not needed for whisper-cpp)
+  server_url = ""              # For whisper-cpp only: local server URL (e.g., "http://192.168.10.37:8025/inference")
 
 # Text Injection Configuration
 [injection]
   mode = "fallback"            # Injection method ("clipboard", "type", "fallback")
   restore_clipboard = true     # Restore original clipboard after injection
   wtype_timeout = "5s"         # Timeout for direct typing via wtype
+  wtype_delay = "300ms"        # Delay before wtype (for window manager to settle after keybind)
   clipboard_timeout = "3s"     # Timeout for clipboard operations
 
 # Desktop Notification Configuration
@@ -317,6 +334,8 @@ func SaveDefaultConfig() error {
 #     Models: whisper-large-v3 or whisper-large-v3-turbo
 # - "groq-translation": Groq Whisper API for translation to English (always outputs English text)
 #     Models: whisper-large-v3 only (turbo not supported for translation)
+# - "whisper-cpp": Local whisper.cpp server (requires server_url, no API key needed)
+#     Set server_url to your local server endpoint (e.g., "http://192.168.10.37:8025/inference")
 #
 # Language codes: Use empty string ("") for automatic detection, or specific codes like:
 # "en" (English), "it" (Italian), "es" (Spanish), "fr" (French), "de" (German), etc.

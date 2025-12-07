@@ -21,10 +21,11 @@ type TranscriptionAdapter interface {
 
 // Configuration for the transcriber
 type Config struct {
-	Provider string
-	APIKey   string
-	Language string
-	Model    string
+	Provider  string
+	APIKey    string
+	Language  string
+	Model     string
+	ServerURL string // For local whisper.cpp server
 }
 
 // NewTranscriber creates a new simple transcriber
@@ -50,6 +51,12 @@ func NewTranscriber(config Config) (Transcriber, error) {
 			return nil, fmt.Errorf("Groq API key required")
 		}
 		adapter = NewGroqTranslationAdapter(config)
+
+	case "whisper-cpp":
+		if config.ServerURL == "" {
+			return nil, fmt.Errorf("whisper.cpp server URL required")
+		}
+		adapter = NewWhisperCppAdapter(config)
 
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", config.Provider)

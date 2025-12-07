@@ -8,12 +8,22 @@ import (
 	"time"
 )
 
-func typeText(ctx context.Context, text string, timeout time.Duration) error {
+func typeText(ctx context.Context, text string, timeout time.Duration, delay time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if err := checkWtypeAvailable(); err != nil {
 		return err
+	}
+
+	// Add delay to let window manager settle after keybind
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+			// Delay completed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, "wtype", text)

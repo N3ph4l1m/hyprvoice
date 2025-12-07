@@ -160,10 +160,11 @@ func runInteractiveConfig() error {
 
 	// Provider selection
 	fmt.Println("Select transcription provider:")
-	fmt.Println("  1. openai            - OpenAI Whisper API (cloud-based)")
+	fmt.Println("  1. openai             - OpenAI Whisper API (cloud-based)")
 	fmt.Println("  2. groq-transcription - Groq Whisper API (fast transcription)")
 	fmt.Println("  3. groq-translation   - Groq Whisper API (translate to English)")
-	fmt.Printf("Provider [1-3] (current: %s): ", cfg.Transcription.Provider)
+	fmt.Println("  4. whisper-cpp        - Local whisper.cpp server")
+	fmt.Printf("Provider [1-4] (current: %s): ", cfg.Transcription.Provider)
 	if scanner.Scan() {
 		input := strings.TrimSpace(scanner.Text())
 		switch input {
@@ -173,7 +174,9 @@ func runInteractiveConfig() error {
 			cfg.Transcription.Provider = "groq-transcription"
 		case "3":
 			cfg.Transcription.Provider = "groq-translation"
-		case "openai", "groq-transcription", "groq-translation":
+		case "4":
+			cfg.Transcription.Provider = "whisper-cpp"
+		case "openai", "groq-transcription", "groq-translation", "whisper-cpp":
 			cfg.Transcription.Provider = input
 		}
 	}
@@ -223,21 +226,37 @@ func runInteractiveConfig() error {
 				cfg.Transcription.Model = "whisper-large-v3"
 			}
 		}
+	} else if cfg.Transcription.Provider == "whisper-cpp" {
+		fmt.Println("\nWhisper.cpp Local Server:")
+		fmt.Printf("Server URL (current: %s): ", cfg.Transcription.ServerURL)
+		if scanner.Scan() {
+			input := strings.TrimSpace(scanner.Text())
+			if input != "" {
+				cfg.Transcription.ServerURL = input
+			}
+		}
+		// No model needed for whisper-cpp - it uses whatever model is loaded on the server
+		cfg.Transcription.Model = ""
 	}
 
-	// API Key (provider-aware)
-	var envVarName string
-	if cfg.Transcription.Provider == "openai" {
-		envVarName = "OPENAI_API_KEY"
-	} else {
-		envVarName = "GROQ_API_KEY"
-	}
-	fmt.Printf("\nAPI Key (current: %s, leave empty to use %s env var): ", maskAPIKey(cfg.Transcription.APIKey), envVarName)
-	if scanner.Scan() {
-		input := strings.TrimSpace(scanner.Text())
-		if input != "" {
-			cfg.Transcription.APIKey = input
+	// API Key (provider-aware) - not needed for whisper-cpp
+	if cfg.Transcription.Provider != "whisper-cpp" {
+		var envVarName string
+		if cfg.Transcription.Provider == "openai" {
+			envVarName = "OPENAI_API_KEY"
+		} else {
+			envVarName = "GROQ_API_KEY"
 		}
+		fmt.Printf("\nAPI Key (current: %s, leave empty to use %s env var): ", maskAPIKey(cfg.Transcription.APIKey), envVarName)
+		if scanner.Scan() {
+			input := strings.TrimSpace(scanner.Text())
+			if input != "" {
+				cfg.Transcription.APIKey = input
+			}
+		}
+	} else {
+		// Clear API key for whisper-cpp
+		cfg.Transcription.APIKey = ""
 	}
 
 	// Language
@@ -384,16 +403,18 @@ func saveConfig(cfg *config.Config) error {
 
 # Speech Transcription Configuration
 [transcription]
-  provider = "%s"          # Transcription service: "openai", "groq-transcription", or "groq-translation"
+  provider = "%s"          # Transcription service: "openai", "groq-transcription", "groq-translation", or "whisper-cpp"
   api_key = "%s"                 # API key (or set OPENAI_API_KEY/GROQ_API_KEY environment variable)
   language = "%s"                # Language code (empty for auto-detect, "en", "it", "es", "fr", etc.)
-  model = "%s"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3" or "whisper-large-v3-turbo"
+  model = "%s"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3" or "whisper-large-v3-turbo" (not needed for whisper-cpp)
+  server_url = "%s"              # For whisper-cpp only: local server URL (e.g., "http://192.168.10.37:8025/inference")
 
 # Text Injection Configuration
 [injection]
   mode = "%s"            # Injection method ("clipboard", "type", "fallback")
   restore_clipboard = %v     # Restore original clipboard after injection
   wtype_timeout = "%s"         # Timeout for direct typing via wtype
+  wtype_delay = "%s"           # Delay before wtype (for window manager to settle after keybind)
   clipboard_timeout = "%s"     # Timeout for clipboard operations
 
 # Desktop Notification Configuration
@@ -412,6 +433,8 @@ func saveConfig(cfg *config.Config) error {
 #     Models: whisper-large-v3 or whisper-large-v3-turbo
 # - "groq-translation": Groq Whisper API for translation to English (always outputs English text)
 #     Models: whisper-large-v3 only (turbo not supported for translation)
+# - "whisper-cpp": Local whisper.cpp server (requires server_url, no API key needed)
+#     Set server_url to your local server endpoint (e.g., "http://192.168.10.37:8025/inference")
 #
 # Language codes: Use empty string ("") for automatic detection, or specific codes like:
 # "en" (English), "it" (Italian), "es" (Spanish), "fr" (French), "de" (German), etc.
@@ -428,9 +451,11 @@ func saveConfig(cfg *config.Config) error {
 		cfg.Transcription.APIKey,
 		cfg.Transcription.Language,
 		cfg.Transcription.Model,
+		cfg.Transcription.ServerURL,
 		cfg.Injection.Mode,
 		cfg.Injection.RestoreClipboard,
 		cfg.Injection.WtypeTimeout,
+		cfg.Injection.WtypeDelay,
 		cfg.Injection.ClipboardTimeout,
 		cfg.Notifications.Enabled,
 		cfg.Notifications.Type,

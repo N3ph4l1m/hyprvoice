@@ -14,6 +14,7 @@ type Config struct {
 	Mode             string        // "clipboard", "type", "fallback"
 	RestoreClipboard bool          // Restore original clipboard after injection
 	WtypeTimeout     time.Duration // Timeout for wtype commands
+	WtypeDelay       time.Duration // Delay before wtype (for window manager to settle)
 	ClipboardTimeout time.Duration // Timeout for clipboard operations
 }
 
@@ -57,14 +58,14 @@ func (i *injector) Inject(ctx context.Context, text string) error {
 		return nil
 
 	case "type":
-		err = typeText(ctx, text, i.config.WtypeTimeout)
+		err = typeText(ctx, text, i.config.WtypeTimeout, i.config.WtypeDelay)
 		if err != nil {
 			return fmt.Errorf("failed to type text: %w", err)
 		}
 
 	case "fallback":
 		// Try typing first, fallback to clipboard
-		err = typeText(ctx, text, i.config.WtypeTimeout)
+		err = typeText(ctx, text, i.config.WtypeTimeout, i.config.WtypeDelay)
 		if err != nil {
 			// Typing failed, but clipboard is already set from above
 			// Just log the typing error but don't fail the injection
