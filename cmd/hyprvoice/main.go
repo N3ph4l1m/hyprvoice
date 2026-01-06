@@ -12,6 +12,7 @@ import (
 	"github.com/leonardotrapani/hyprvoice/internal/bus"
 	"github.com/leonardotrapani/hyprvoice/internal/config"
 	"github.com/leonardotrapani/hyprvoice/internal/daemon"
+	"github.com/leonardotrapani/hyprvoice/internal/notify"
 	"github.com/spf13/cobra"
 )
 
@@ -131,7 +132,7 @@ func configureCmd() *cobra.Command {
 		Short: "Interactive configuration setup",
 		Long: `Interactive configuration wizard for hyprvoice.
 This will guide you through setting up:
-- Transcription provider (OpenAI or Groq)
+- Transcription provider (OpenAI, Groq, or Mistral)
 - API keys and model selection
 - Audio and text injection preferences
 - Notification settings`,
@@ -159,14 +160,21 @@ func runInteractiveConfig() error {
 	fmt.Println("------------------------------")
 
 	// Provider selection
-	fmt.Println("Select transcription provider:")
-	fmt.Println("  1. openai             - OpenAI Whisper API (cloud-based)")
-	fmt.Println("  2. groq-transcription - Groq Whisper API (fast transcription)")
-	fmt.Println("  3. groq-translation   - Groq Whisper API (translate to English)")
-	fmt.Println("  4. whisper-cpp        - Local whisper.cpp server")
-	fmt.Printf("Provider [1-4] (current: %s): ", cfg.Transcription.Provider)
-	if scanner.Scan() {
+	for {
+		fmt.Println("Select transcription provider:")
+		fmt.Println("  1. openai                - OpenAI Whisper API (cloud-based)")
+		fmt.Println("  2. groq-transcription    - Groq Whisper API (fast transcription)")
+		fmt.Println("  3. groq-translation      - Groq Whisper API (translate to English)")
+		fmt.Println("  4. mistral-transcription - Mistral Voxtral API (excellent for European languages)")
+		fmt.Println("  5. whisper-cpp           - Local whisper.cpp server")
+		fmt.Printf("Provider [1-5] (current: %s): ", cfg.Transcription.Provider)
+		if !scanner.Scan() {
+			break
+		}
 		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			break // keep current
+		}
 		switch input {
 		case "1":
 			cfg.Transcription.Provider = "openai"
@@ -175,14 +183,22 @@ func runInteractiveConfig() error {
 		case "3":
 			cfg.Transcription.Provider = "groq-translation"
 		case "4":
+			cfg.Transcription.Provider = "mistral-transcription"
+		case "5":
 			cfg.Transcription.Provider = "whisper-cpp"
-		case "openai", "groq-transcription", "groq-translation", "whisper-cpp":
+		case "openai", "groq-transcription", "groq-translation", "mistral-transcription", "whisper-cpp":
 			cfg.Transcription.Provider = input
+		default:
+			fmt.Println("❌ Error: invalid provider. Please enter 1-5 or provider name.")
+			fmt.Println()
+			continue
 		}
+		break
 	}
 
 	// Model selection based on provider
-	if cfg.Transcription.Provider == "openai" {
+	switch cfg.Transcription.Provider {
+	case "openai":
 		fmt.Println("\nOpenAI Model:")
 		fmt.Printf("Model (current: %s): ", cfg.Transcription.Model)
 		if scanner.Scan() {
@@ -193,12 +209,15 @@ func runInteractiveConfig() error {
 				cfg.Transcription.Model = "whisper-1"
 			}
 		}
-	} else if cfg.Transcription.Provider == "groq-transcription" {
-		fmt.Println("\nGroq Transcription Model:")
-		fmt.Println("  1. whisper-large-v3       - Standard model")
-		fmt.Println("  2. whisper-large-v3-turbo - Faster model")
-		fmt.Printf("Model [1-2] (current: %s): ", cfg.Transcription.Model)
-		if scanner.Scan() {
+	case "groq-transcription":
+		for {
+			fmt.Println("\nGroq Transcription Model:")
+			fmt.Println("  1. whisper-large-v3       - Standard model")
+			fmt.Println("  2. whisper-large-v3-turbo - Faster model")
+			fmt.Printf("Model [1-2] (current: %s): ", cfg.Transcription.Model)
+			if !scanner.Scan() {
+				break
+			}
 			input := strings.TrimSpace(scanner.Text())
 			switch input {
 			case "1":
@@ -211,22 +230,55 @@ func runInteractiveConfig() error {
 				if cfg.Transcription.Model == "" {
 					cfg.Transcription.Model = "whisper-large-v3-turbo"
 				}
+			default:
+				fmt.Println("❌ Error: invalid model. Please enter 1, 2 or model name.")
+				continue
 			}
+			break
 		}
-	} else if cfg.Transcription.Provider == "groq-translation" {
-		fmt.Println("\nGroq Translation Model:")
-		fmt.Println("  Note: Translation only supports whisper-large-v3 (turbo not available)")
-		fmt.Printf("Model (current: %s, press Enter for whisper-large-v3): ", cfg.Transcription.Model)
-		if scanner.Scan() {
+	case "groq-translation":
+		for {
+			fmt.Println("\nGroq Translation Model:")
+			fmt.Println("  Note: Translation only supports whisper-large-v3 (turbo not available)")
+			fmt.Printf("Model (current: %s, press Enter for whisper-large-v3): ", cfg.Transcription.Model)
+			if !scanner.Scan() {
+				break
+			}
 			input := strings.TrimSpace(scanner.Text())
 			if input == "" || input == "whisper-large-v3" || input == "1" {
 				cfg.Transcription.Model = "whisper-large-v3"
-			} else {
-				fmt.Println("  Warning: Only whisper-large-v3 is supported for translation. Using whisper-large-v3.")
-				cfg.Transcription.Model = "whisper-large-v3"
+				break
 			}
+			fmt.Println("❌ Error: only whisper-large-v3 is supported for translation.")
 		}
-	} else if cfg.Transcription.Provider == "whisper-cpp" {
+	case "mistral-transcription":
+		for {
+			fmt.Println("\nMistral Voxtral Model:")
+			fmt.Println("  1. voxtral-mini-latest - Recommended (latest version)")
+			fmt.Println("  2. voxtral-mini-2507   - Pinned version")
+			fmt.Printf("Model [1-2] (current: %s): ", cfg.Transcription.Model)
+			if !scanner.Scan() {
+				break
+			}
+			input := strings.TrimSpace(scanner.Text())
+			switch input {
+			case "1":
+				cfg.Transcription.Model = "voxtral-mini-latest"
+			case "2":
+				cfg.Transcription.Model = "voxtral-mini-2507"
+			case "voxtral-mini-latest", "voxtral-mini-2507":
+				cfg.Transcription.Model = input
+			case "":
+				if cfg.Transcription.Model == "" || !strings.HasPrefix(cfg.Transcription.Model, "voxtral") {
+					cfg.Transcription.Model = "voxtral-mini-latest"
+				}
+			default:
+				fmt.Println("❌ Error: invalid model. Please enter 1, 2 or model name.")
+				continue
+			}
+			break
+		}
+	case "whisper-cpp":
 		fmt.Println("\nWhisper.cpp Local Server:")
 		fmt.Printf("Server URL (current: %s): ", cfg.Transcription.ServerURL)
 		if scanner.Scan() {
@@ -242,9 +294,12 @@ func runInteractiveConfig() error {
 	// API Key (provider-aware) - not needed for whisper-cpp
 	if cfg.Transcription.Provider != "whisper-cpp" {
 		var envVarName string
-		if cfg.Transcription.Provider == "openai" {
+		switch cfg.Transcription.Provider {
+		case "openai":
 			envVarName = "OPENAI_API_KEY"
-		} else {
+		case "mistral-transcription":
+			envVarName = "MISTRAL_API_KEY"
+		default:
 			envVarName = "GROQ_API_KEY"
 		}
 		fmt.Printf("\nAPI Key (current: %s, leave empty to use %s env var): ", maskAPIKey(cfg.Transcription.APIKey), envVarName)
@@ -274,54 +329,201 @@ func runInteractiveConfig() error {
 	fmt.Println()
 
 	// Configure injection
-	fmt.Println("⌨️  Text Injection Configuration")
-	fmt.Println("--------------------------------")
-	fmt.Printf("Injection mode [clipboard/type/fallback] (current: %s): ", cfg.Injection.Mode)
-	if scanner.Scan() {
-		input := strings.TrimSpace(scanner.Text())
-		if input != "" && (input == "clipboard" || input == "type" || input == "fallback") {
-			cfg.Injection.Mode = input
+	for {
+		fmt.Println("⌨️  Text Injection Configuration")
+		fmt.Println("--------------------------------")
+		fmt.Println("Backends are tried in order until one succeeds (fallback chain):")
+		fmt.Println("  - ydotool:   Best for Chromium/Electron apps (requires ydotoold daemon)")
+		fmt.Println("  - wtype:     Native Wayland typing (may fail on some Chromium apps)")
+		fmt.Println("  - clipboard: Copies to clipboard only (most reliable, needs manual paste)")
+		fmt.Println()
+		fmt.Println("Recommended: ydotool,wtype,clipboard (full fallback chain)")
+		fmt.Println()
+		fmt.Printf("Backends (comma-separated) (current: %s): ", strings.Join(cfg.Injection.Backends, ","))
+		if !scanner.Scan() {
+			break
 		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			break // keep current
+		}
+		backends := strings.Split(input, ",")
+		validBackends := make([]string, 0)
+		invalidBackends := make([]string, 0)
+		for _, b := range backends {
+			b = strings.TrimSpace(b)
+			if b == "ydotool" || b == "wtype" || b == "clipboard" {
+				validBackends = append(validBackends, b)
+			} else if b != "" {
+				invalidBackends = append(invalidBackends, b)
+			}
+		}
+		if len(invalidBackends) > 0 {
+			fmt.Printf("❌ Error: invalid backend(s): %s. Valid: ydotool, wtype, clipboard.\n", strings.Join(invalidBackends, ", "))
+			fmt.Println()
+			continue
+		}
+		if len(validBackends) == 0 {
+			fmt.Println("❌ Error: at least one backend required.")
+			fmt.Println()
+			continue
+		}
+		cfg.Injection.Backends = validBackends
+		break
 	}
 
-	fmt.Printf("Restore clipboard after injection [y/n] (current: %v): ", cfg.Injection.RestoreClipboard)
-	if scanner.Scan() {
-		switch strings.TrimSpace(strings.ToLower(scanner.Text())) {
-		case "y", "yes":
-			cfg.Injection.RestoreClipboard = true
-		case "n", "no":
-			cfg.Injection.RestoreClipboard = false
+	// Check if ydotool is selected and warn about daemon requirement
+	for _, b := range cfg.Injection.Backends {
+		if b == "ydotool" {
+			fmt.Println()
+			fmt.Println("⚠️  ydotool requires the ydotoold daemon to be running! make sure it works")
+			fmt.Println()
+			break
 		}
 	}
 
 	fmt.Println()
 
 	// Configure notifications
-	fmt.Println("🔔 Notification Configuration")
-	fmt.Println("-----------------------------")
-	fmt.Printf("Enable notifications [y/n] (current: %v): ", cfg.Notifications.Enabled)
-	if scanner.Scan() {
-		switch strings.TrimSpace(strings.ToLower(scanner.Text())) {
+	for {
+		fmt.Println("🔔 Notification Configuration")
+		fmt.Println("-----------------------------")
+		fmt.Printf("Enable notifications [y/n] (current: %v): ", cfg.Notifications.Enabled)
+		if !scanner.Scan() {
+			break
+		}
+		input := strings.TrimSpace(strings.ToLower(scanner.Text()))
+		switch input {
 		case "y", "yes":
 			cfg.Notifications.Enabled = true
 		case "n", "no":
 			cfg.Notifications.Enabled = false
+		case "":
+			// keep current
+		default:
+			fmt.Println("❌ Error: please enter y or n.")
+			fmt.Println()
+			continue
+		}
+		break
+	}
+
+	// Ask if user wants to customize notification messages
+	fmt.Print("Customize notification messages? [y/n] (default: n): ")
+	if scanner.Scan() {
+		input := strings.TrimSpace(strings.ToLower(scanner.Text()))
+		if input == "y" || input == "yes" {
+			fmt.Println()
+			// Get resolved values (user config merged with defaults)
+			msgs := cfg.Notifications.Messages.Resolve()
+
+			// Recording Started
+			fmt.Println("  Recording Started notification:")
+			fmt.Printf("    Title (current: %s): ", msgs[notify.MsgRecordingStarted].Title)
+			if scanner.Scan() {
+				if t := strings.TrimSpace(scanner.Text()); t != "" {
+					cfg.Notifications.Messages.RecordingStarted.Title = t
+				}
+			}
+			fmt.Printf("    Body (current: %s): ", msgs[notify.MsgRecordingStarted].Body)
+			if scanner.Scan() {
+				if b := strings.TrimSpace(scanner.Text()); b != "" {
+					cfg.Notifications.Messages.RecordingStarted.Body = b
+				}
+			}
+			fmt.Println()
+
+			// Transcribing
+			fmt.Println("  Transcribing notification:")
+			fmt.Printf("    Title (current: %s): ", msgs[notify.MsgTranscribing].Title)
+			if scanner.Scan() {
+				if t := strings.TrimSpace(scanner.Text()); t != "" {
+					cfg.Notifications.Messages.Transcribing.Title = t
+				}
+			}
+			fmt.Printf("    Body (current: %s): ", msgs[notify.MsgTranscribing].Body)
+			if scanner.Scan() {
+				if b := strings.TrimSpace(scanner.Text()); b != "" {
+					cfg.Notifications.Messages.Transcribing.Body = b
+				}
+			}
+			fmt.Println()
+
+			// Config Reloaded
+			fmt.Println("  Config Reloaded notification:")
+			fmt.Printf("    Title (current: %s): ", msgs[notify.MsgConfigReloaded].Title)
+			if scanner.Scan() {
+				if t := strings.TrimSpace(scanner.Text()); t != "" {
+					cfg.Notifications.Messages.ConfigReloaded.Title = t
+				}
+			}
+			fmt.Printf("    Body (current: %s): ", msgs[notify.MsgConfigReloaded].Body)
+			if scanner.Scan() {
+				if b := strings.TrimSpace(scanner.Text()); b != "" {
+					cfg.Notifications.Messages.ConfigReloaded.Body = b
+				}
+			}
+			fmt.Println()
+
+			// Operation Cancelled
+			fmt.Println("  Operation Cancelled notification:")
+			fmt.Printf("    Title (current: %s): ", msgs[notify.MsgOperationCancelled].Title)
+			if scanner.Scan() {
+				if t := strings.TrimSpace(scanner.Text()); t != "" {
+					cfg.Notifications.Messages.OperationCancelled.Title = t
+				}
+			}
+			fmt.Printf("    Body (current: %s): ", msgs[notify.MsgOperationCancelled].Body)
+			if scanner.Scan() {
+				if b := strings.TrimSpace(scanner.Text()); b != "" {
+					cfg.Notifications.Messages.OperationCancelled.Body = b
+				}
+			}
+			fmt.Println()
+
+			// Recording Aborted (body only)
+			fmt.Println("  Recording Aborted notification:")
+			fmt.Printf("    Body (current: %s): ", msgs[notify.MsgRecordingAborted].Body)
+			if scanner.Scan() {
+				if b := strings.TrimSpace(scanner.Text()); b != "" {
+					cfg.Notifications.Messages.RecordingAborted.Body = b
+				}
+			}
+			fmt.Println()
+
+			// Injection Aborted (body only)
+			fmt.Println("  Injection Aborted notification:")
+			fmt.Printf("    Body (current: %s): ", msgs[notify.MsgInjectionAborted].Body)
+			if scanner.Scan() {
+				if b := strings.TrimSpace(scanner.Text()); b != "" {
+					cfg.Notifications.Messages.InjectionAborted.Body = b
+				}
+			}
 		}
 	}
 
 	fmt.Println()
 
 	// Configure recording timeout
-	fmt.Println("⏱️  Recording Configuration")
-	fmt.Println("---------------------------")
-	fmt.Printf("Recording timeout in minutes (current: %.0f): ", cfg.Recording.Timeout.Minutes())
-	if scanner.Scan() {
-		input := strings.TrimSpace(scanner.Text())
-		if input != "" {
-			if minutes, err := strconv.Atoi(input); err == nil && minutes > 0 {
-				cfg.Recording.Timeout = time.Duration(minutes) * time.Minute
-			}
+	for {
+		fmt.Println("⏱️  Recording Configuration")
+		fmt.Println("---------------------------")
+		fmt.Printf("Recording timeout in minutes (current: %.0f): ", cfg.Recording.Timeout.Minutes())
+		if !scanner.Scan() {
+			break
 		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			break // keep current
+		}
+		minutes, err := strconv.Atoi(input)
+		if err != nil || minutes <= 0 {
+			fmt.Println("❌ Error: please enter a positive number.")
+			fmt.Println()
+			continue
+		}
+		cfg.Recording.Timeout = time.Duration(minutes) * time.Minute
+		break
 	}
 
 	fmt.Println()
@@ -348,21 +550,43 @@ func runInteractiveConfig() error {
 		serviceRunning = true
 	}
 
+	// Check if ydotool is in backends
+	hasYdotool := false
+	for _, b := range cfg.Injection.Backends {
+		if b == "ydotool" {
+			hasYdotool = true
+			break
+		}
+	}
+
 	// Show next steps
 	fmt.Println("🚀 Next Steps:")
-	if !serviceRunning {
-		fmt.Println("1. Start the service: systemctl --user start hyprvoice.service")
-		fmt.Println("2. Test voice input: hyprvoice toggle")
-	} else {
-		fmt.Println("1. Restart the service to apply changes: systemctl --user restart hyprvoice.service")
-		fmt.Println("2. Test voice input: hyprvoice toggle")
+	step := 1
+	if hasYdotool {
+		fmt.Printf("%d. Ensure ydotoold is running\n", step)
+		step++
 	}
+	if !serviceRunning {
+		fmt.Printf("%d. Start the service: systemctl --user start hyprvoice.service\n", step)
+	} else {
+		fmt.Printf("%d. Restart the service to apply changes: systemctl --user restart hyprvoice.service\n", step)
+	}
+	step++
+	fmt.Printf("%d. Test voice input: hyprvoice toggle (or use keybind you configured in hyprland config)\n", step)
 	fmt.Println()
 
 	configPath, _ := config.GetConfigPath()
 	fmt.Printf("📁 Config file location: %s\n", configPath)
 
 	return nil
+}
+
+func formatBackends(backends []string) string {
+	quoted := make([]string, len(backends))
+	for i, b := range backends {
+		quoted[i] = fmt.Sprintf(`"%s"`, b)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func maskAPIKey(key string) string {
@@ -403,29 +627,25 @@ func saveConfig(cfg *config.Config) error {
 
 # Speech Transcription Configuration
 [transcription]
-  provider = "%s"          # Transcription service: "openai", "groq-transcription", "groq-translation", or "whisper-cpp"
-  api_key = "%s"                 # API key (or set OPENAI_API_KEY/GROQ_API_KEY environment variable)
+  provider = "%s"          # Transcription service: "openai", "groq-transcription", "groq-translation", "mistral-transcription", or "whisper-cpp"
+  api_key = "%s"                 # API key (or set OPENAI_API_KEY/GROQ_API_KEY/MISTRAL_API_KEY environment variable)
   language = "%s"                # Language code (empty for auto-detect, "en", "it", "es", "fr", etc.)
-  model = "%s"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3" or "whisper-large-v3-turbo" (not needed for whisper-cpp)
+  model = "%s"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3", Mistral="voxtral-mini-latest" (not needed for whisper-cpp)
   server_url = "%s"              # For whisper-cpp only: local server URL (e.g., "http://192.168.10.37:8025/inference")
 
 # Text Injection Configuration
 [injection]
-  mode = "%s"            # Injection method ("clipboard", "type", "fallback")
-  restore_clipboard = %v     # Restore original clipboard after injection
-  wtype_timeout = "%s"         # Timeout for direct typing via wtype
-  wtype_delay = "%s"           # Delay before wtype (for window manager to settle after keybind)
+  backends = [%s]  # Ordered fallback chain (tries each until one succeeds)
+  ydotool_timeout = "%s"       # Timeout for ydotool commands
+  wtype_timeout = "%s"         # Timeout for wtype commands
   clipboard_timeout = "%s"     # Timeout for clipboard operations
 
-# Desktop Notification Configuration
-[notifications]
-  enabled = %v               # Enable desktop notifications
-  type = "%s"             # Notification type ("desktop", "log", "none")
-
-# Mode explanations:
-# - "clipboard": Copy text to clipboard only
-# - "type": Direct typing via wtype only
-# - "fallback": Try typing first, fallback to clipboard if it fails
+# Backend explanations:
+# - "ydotool": Uses ydotool (requires ydotoold daemon running). Most compatible with Chromium/Electron apps.
+# - "wtype": Uses wtype for Wayland. May have issues with some Chromium-based apps.
+# - "clipboard": Copies text to clipboard only (most reliable, but requires manual paste).
+#
+# The backends are tried in order. First successful one wins.
 #
 # Provider explanations:
 # - "openai": OpenAI Whisper API (cloud-based, requires OPENAI_API_KEY)
@@ -433,12 +653,19 @@ func saveConfig(cfg *config.Config) error {
 #     Models: whisper-large-v3 or whisper-large-v3-turbo
 # - "groq-translation": Groq Whisper API for translation to English (always outputs English text)
 #     Models: whisper-large-v3 only (turbo not supported for translation)
+# - "mistral-transcription": Mistral Voxtral API (excellent for European languages, requires MISTRAL_API_KEY)
+#     Models: voxtral-mini-latest or voxtral-mini-2507
 # - "whisper-cpp": Local whisper.cpp server (requires server_url, no API key needed)
 #     Set server_url to your local server endpoint (e.g., "http://192.168.10.37:8025/inference")
 #
 # Language codes: Use empty string ("") for automatic detection, or specific codes like:
 # "en" (English), "it" (Italian), "es" (Spanish), "fr" (French), "de" (German), etc.
 # For groq-translation, the language field hints at the source audio language for better accuracy.
+
+# Desktop Notification Configuration
+[notifications]
+  enabled = %v               # Enable desktop notifications
+  type = "%s"             # Notification type ("desktop", "log", "none")
 `,
 		cfg.Recording.SampleRate,
 		cfg.Recording.Channels,
@@ -452,10 +679,9 @@ func saveConfig(cfg *config.Config) error {
 		cfg.Transcription.Language,
 		cfg.Transcription.Model,
 		cfg.Transcription.ServerURL,
-		cfg.Injection.Mode,
-		cfg.Injection.RestoreClipboard,
+		formatBackends(cfg.Injection.Backends),
+		cfg.Injection.YdotoolTimeout,
 		cfg.Injection.WtypeTimeout,
-		cfg.Injection.WtypeDelay,
 		cfg.Injection.ClipboardTimeout,
 		cfg.Notifications.Enabled,
 		cfg.Notifications.Type,
@@ -465,5 +691,47 @@ func saveConfig(cfg *config.Config) error {
 		return fmt.Errorf("failed to write config content: %w", err)
 	}
 
+	// Write notification messages if any are configured
+	msgs := cfg.Notifications.Messages
+	if hasCustomMessages(msgs) {
+		messagesContent := "\n  [notifications.messages]\n"
+		if msgs.RecordingStarted.Title != "" || msgs.RecordingStarted.Body != "" {
+			messagesContent += fmt.Sprintf("    [notifications.messages.recording_started]\n      title = %q\n      body = %q\n",
+				msgs.RecordingStarted.Title, msgs.RecordingStarted.Body)
+		}
+		if msgs.Transcribing.Title != "" || msgs.Transcribing.Body != "" {
+			messagesContent += fmt.Sprintf("    [notifications.messages.transcribing]\n      title = %q\n      body = %q\n",
+				msgs.Transcribing.Title, msgs.Transcribing.Body)
+		}
+		if msgs.ConfigReloaded.Title != "" || msgs.ConfigReloaded.Body != "" {
+			messagesContent += fmt.Sprintf("    [notifications.messages.config_reloaded]\n      title = %q\n      body = %q\n",
+				msgs.ConfigReloaded.Title, msgs.ConfigReloaded.Body)
+		}
+		if msgs.OperationCancelled.Title != "" || msgs.OperationCancelled.Body != "" {
+			messagesContent += fmt.Sprintf("    [notifications.messages.operation_cancelled]\n      title = %q\n      body = %q\n",
+				msgs.OperationCancelled.Title, msgs.OperationCancelled.Body)
+		}
+		if msgs.RecordingAborted.Body != "" {
+			messagesContent += fmt.Sprintf("    [notifications.messages.recording_aborted]\n      body = %q\n",
+				msgs.RecordingAborted.Body)
+		}
+		if msgs.InjectionAborted.Body != "" {
+			messagesContent += fmt.Sprintf("    [notifications.messages.injection_aborted]\n      body = %q\n",
+				msgs.InjectionAborted.Body)
+		}
+		if _, err := file.WriteString(messagesContent); err != nil {
+			return fmt.Errorf("failed to write messages config: %w", err)
+		}
+	}
+
 	return nil
+}
+
+func hasCustomMessages(msgs config.MessagesConfig) bool {
+	return msgs.RecordingStarted.Title != "" || msgs.RecordingStarted.Body != "" ||
+		msgs.Transcribing.Title != "" || msgs.Transcribing.Body != "" ||
+		msgs.ConfigReloaded.Title != "" || msgs.ConfigReloaded.Body != "" ||
+		msgs.OperationCancelled.Title != "" || msgs.OperationCancelled.Body != "" ||
+		msgs.RecordingAborted.Body != "" ||
+		msgs.InjectionAborted.Body != ""
 }

@@ -5,10 +5,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/leonardotrapani/hyprvoice/internal/injection"
+	"github.com/leonardotrapani/hyprvoice/internal/notify"
 	"github.com/leonardotrapani/hyprvoice/internal/recording"
 	"github.com/leonardotrapani/hyprvoice/internal/transcriber"
 )
@@ -39,16 +41,63 @@ type TranscriptionConfig struct {
 }
 
 type InjectionConfig struct {
-	Mode             string        `toml:"mode"`
-	RestoreClipboard bool          `toml:"restore_clipboard"`
+	Backends         []string      `toml:"backends"`
+	YdotoolTimeout   time.Duration `toml:"ydotool_timeout"`
 	WtypeTimeout     time.Duration `toml:"wtype_timeout"`
 	WtypeDelay       time.Duration `toml:"wtype_delay"`
 	ClipboardTimeout time.Duration `toml:"clipboard_timeout"`
 }
 
 type NotificationsConfig struct {
-	Enabled bool   `toml:"enabled"`
-	Type    string `toml:"type"` // "desktop", "log", "none"
+	Enabled  bool           `toml:"enabled"`
+	Type     string         `toml:"type"` // "desktop", "log", "none"
+	Messages MessagesConfig `toml:"messages"`
+}
+
+type MessageConfig struct {
+	Title string `toml:"title"`
+	Body  string `toml:"body"`
+}
+
+type MessagesConfig struct {
+	RecordingStarted   MessageConfig `toml:"recording_started"`
+	Transcribing       MessageConfig `toml:"transcribing"`
+	ConfigReloaded     MessageConfig `toml:"config_reloaded"`
+	OperationCancelled MessageConfig `toml:"operation_cancelled"`
+	RecordingAborted   MessageConfig `toml:"recording_aborted"`
+	InjectionAborted   MessageConfig `toml:"injection_aborted"`
+}
+
+// Resolve merges user config with defaults from MessageDefs
+func (m *MessagesConfig) Resolve() map[notify.MessageType]notify.Message {
+	result := make(map[notify.MessageType]notify.Message)
+
+	// Build toml tag → field index map
+	v := reflect.ValueOf(m).Elem()
+	t := v.Type()
+	tagToField := make(map[string]int)
+	for i := 0; i < t.NumField(); i++ {
+		tagToField[t.Field(i).Tag.Get("toml")] = i
+	}
+
+	for _, def := range notify.MessageDefs {
+		msg := notify.Message{
+			Title:   def.DefaultTitle,
+			Body:    def.DefaultBody,
+			IsError: def.IsError,
+		}
+		if idx, ok := tagToField[def.ConfigKey]; ok {
+			userMsg := v.Field(idx).Interface().(MessageConfig)
+			if userMsg.Title != "" {
+				msg.Title = userMsg.Title
+			}
+			if userMsg.Body != "" {
+				msg.Body = userMsg.Body
+			}
+		}
+		result[def.Type] = msg
+	}
+	return result
 }
 
 func (c *Config) ToRecordingConfig() recording.Config {
@@ -79,6 +128,8 @@ func (c *Config) ToTranscriberConfig() transcriber.Config {
 			config.APIKey = os.Getenv("OPENAI_API_KEY")
 		case "groq-transcription", "groq-translation":
 			config.APIKey = os.Getenv("GROQ_API_KEY")
+		case "mistral-transcription":
+			config.APIKey = os.Getenv("MISTRAL_API_KEY")
 		}
 	}
 
@@ -87,8 +138,8 @@ func (c *Config) ToTranscriberConfig() transcriber.Config {
 
 func (c *Config) ToInjectionConfig() injection.Config {
 	return injection.Config{
-		Mode:             c.Injection.Mode,
-		RestoreClipboard: c.Injection.RestoreClipboard,
+		Backends:         c.Injection.Backends,
+		YdotoolTimeout:   c.Injection.YdotoolTimeout,
 		WtypeTimeout:     c.Injection.WtypeTimeout,
 		WtypeDelay:       c.Injection.WtypeDelay,
 		ClipboardTimeout: c.Injection.ClipboardTimeout,
@@ -176,6 +227,26 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid model for groq-translation: %s (must be whisper-large-v3, turbo version not supported for translation)", c.Transcription.Model)
 		}
 
+	case "mistral-transcription":
+		apiKey := c.Transcription.APIKey
+		if apiKey == "" {
+			apiKey = os.Getenv("MISTRAL_API_KEY")
+		}
+		if apiKey == "" {
+			return fmt.Errorf("Mistral API key required: not found in config (transcription.api_key) or environment variable (MISTRAL_API_KEY)")
+		}
+
+		// Validate language code if provided (empty string means auto-detect)
+		if c.Transcription.Language != "" && !isValidLanguageCode(c.Transcription.Language) {
+			return fmt.Errorf("invalid transcription.language: %s (use empty string for auto-detect or ISO-639-1 codes like 'en', 'es', 'fr')", c.Transcription.Language)
+		}
+
+		// Validate Mistral model
+		validMistralModels := map[string]bool{"voxtral-mini-latest": true, "voxtral-mini-2507": true}
+		if c.Transcription.Model != "" && !validMistralModels[c.Transcription.Model] {
+			return fmt.Errorf("invalid model for mistral-transcription: %s (must be voxtral-mini-latest or voxtral-mini-2507)", c.Transcription.Model)
+		}
+
 	case "whisper-cpp":
 		if c.Transcription.ServerURL == "" {
 			return fmt.Errorf("whisper.cpp server URL required: set transcription.server_url in config (e.g., http://192.168.10.37:8025/inference)")
@@ -187,7 +258,7 @@ func (c *Config) Validate() error {
 		}
 
 	default:
-		return fmt.Errorf("unsupported transcription.provider: %s (must be openai, groq-transcription, groq-translation, or whisper-cpp)", c.Transcription.Provider)
+		return fmt.Errorf("unsupported transcription.provider: %s (must be openai, groq-transcription, groq-translation, mistral-transcription, or whisper-cpp)", c.Transcription.Provider)
 	}
 
 	// Model validation - not required for whisper-cpp (uses server's loaded model)
@@ -196,9 +267,17 @@ func (c *Config) Validate() error {
 	}
 
 	// Injection
-	validModes := map[string]bool{"clipboard": true, "type": true, "fallback": true}
-	if !validModes[c.Injection.Mode] {
-		return fmt.Errorf("invalid injection.mode: %s (must be clipboard, type, or fallback)", c.Injection.Mode)
+	if len(c.Injection.Backends) == 0 {
+		return fmt.Errorf("invalid injection.backends: empty (must have at least one backend)")
+	}
+	validBackends := map[string]bool{"ydotool": true, "wtype": true, "clipboard": true}
+	for _, backend := range c.Injection.Backends {
+		if !validBackends[backend] {
+			return fmt.Errorf("invalid injection.backends: unknown backend %q (must be ydotool, wtype, or clipboard)", backend)
+		}
+	}
+	if c.Injection.YdotoolTimeout <= 0 {
+		return fmt.Errorf("invalid injection.ydotool_timeout: %v", c.Injection.YdotoolTimeout)
 	}
 	if c.Injection.WtypeTimeout <= 0 {
 		return fmt.Errorf("invalid injection.wtype_timeout: %v", c.Injection.WtypeTimeout)
@@ -250,6 +329,15 @@ func GetConfigPath() (string, error) {
 	return filepath.Join(hyprvoiceDir, "config.toml"), nil
 }
 
+// legacyInjectionConfig for migration from old mode-based config
+type legacyInjectionConfig struct {
+	Mode string `toml:"mode"`
+}
+
+type legacyConfig struct {
+	Injection legacyInjectionConfig `toml:"injection"`
+}
+
 func Load() (*Config, error) {
 	configPath, err := GetConfigPath()
 	if err != nil {
@@ -272,8 +360,43 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 	}
 
+	// Migrate legacy mode-based config to backends
+	if len(config.Injection.Backends) == 0 {
+		var legacy legacyConfig
+		toml.DecodeFile(configPath, &legacy)
+		config.migrateInjectionMode(legacy.Injection.Mode)
+	}
+
 	log.Printf("Config: configuration loaded successfully")
 	return &config, nil
+}
+
+// migrateInjectionMode converts old mode field to new backends array
+func (c *Config) migrateInjectionMode(mode string) {
+	switch mode {
+	case "clipboard":
+		c.Injection.Backends = []string{"clipboard"}
+		log.Printf("Config: migrated injection.mode='clipboard' to backends=['clipboard']")
+	case "type":
+		c.Injection.Backends = []string{"wtype"}
+		log.Printf("Config: migrated injection.mode='type' to backends=['wtype']")
+	case "fallback":
+		c.Injection.Backends = []string{"wtype", "clipboard"}
+		log.Printf("Config: migrated injection.mode='fallback' to backends=['wtype', 'clipboard']")
+	default:
+		// Default for new installs or unknown modes
+		c.Injection.Backends = []string{"ydotool", "wtype", "clipboard"}
+		if mode != "" {
+			log.Printf("Config: unknown injection.mode='%s', using default backends", mode)
+		}
+	}
+
+	// Set default ydotool timeout if not set
+	if c.Injection.YdotoolTimeout == 0 {
+		c.Injection.YdotoolTimeout = 5 * time.Second
+	}
+
+	log.Printf("Config: legacy 'mode' config detected - please update your config.toml to use 'backends' instead")
 }
 
 func SaveDefaultConfig() error {
@@ -304,18 +427,17 @@ func SaveDefaultConfig() error {
 
 # Speech Transcription Configuration
 [transcription]
-  provider = "openai"          # Transcription service: "openai", "groq-transcription", "groq-translation", or "whisper-cpp"
-  api_key = ""                 # API key (or set OPENAI_API_KEY/GROQ_API_KEY environment variable)
+  provider = "openai"          # Transcription service: "openai", "groq-transcription", "groq-translation", "mistral-transcription", or "whisper-cpp"
+  api_key = ""                 # API key (or set OPENAI_API_KEY/GROQ_API_KEY/MISTRAL_API_KEY environment variable)
   language = ""                # Language code (empty for auto-detect, "en", "it", "es", "fr", etc.)
-  model = "whisper-1"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3" or "whisper-large-v3-turbo" (not needed for whisper-cpp)
+  model = "whisper-1"          # Model: OpenAI="whisper-1", Groq="whisper-large-v3", Mistral="voxtral-mini-latest" (not needed for whisper-cpp)
   server_url = ""              # For whisper-cpp only: local server URL (e.g., "http://192.168.10.37:8025/inference")
 
 # Text Injection Configuration
 [injection]
-  mode = "fallback"            # Injection method ("clipboard", "type", "fallback")
-  restore_clipboard = true     # Restore original clipboard after injection
-  wtype_timeout = "5s"         # Timeout for direct typing via wtype
-  wtype_delay = "300ms"        # Delay before wtype (for window manager to settle after keybind)
+  backends = ["ydotool", "wtype", "clipboard"]  # Ordered fallback chain (tries each until one succeeds)
+  ydotool_timeout = "5s"       # Timeout for ydotool commands
+  wtype_timeout = "5s"         # Timeout for wtype commands
   clipboard_timeout = "3s"     # Timeout for clipboard operations
 
 # Desktop Notification Configuration
@@ -323,10 +445,47 @@ func SaveDefaultConfig() error {
   enabled = true               # Enable desktop notifications
   type = "desktop"             # Notification type ("desktop", "log", "none")
 
-# Mode explanations:
-# - "clipboard": Copy text to clipboard only
-# - "type": Direct typing via wtype only
-# - "fallback": Try typing first, fallback to clipboard if it fails
+  # Custom notification messages (optional - defaults shown below)
+  # Uncomment and modify to customize notification text
+  # [notifications.messages]
+  #   [notifications.messages.recording_started]
+  #     title = "Hyprvoice"
+  #     body = "Recording Started"
+  #   [notifications.messages.transcribing]
+  #     title = "Hyprvoice"
+  #     body = "Recording Ended... Transcribing"
+  #   [notifications.messages.config_reloaded]
+  #     title = "Hyprvoice"
+  #     body = "Config Reloaded"
+  #   [notifications.messages.operation_cancelled]
+  #     title = "Hyprvoice"
+  #     body = "Operation Cancelled"
+  #   [notifications.messages.recording_aborted]
+  #     body = "Recording Aborted"
+  #   [notifications.messages.injection_aborted]
+  #     body = "Injection Aborted"
+  #
+  # Emoji-only example (for minimal pill-style notifications):
+  #   [notifications.messages.recording_started]
+  #     title = ""
+  #     body = "🎤"
+  #   [notifications.messages.transcribing]
+  #     title = ""
+  #     body = "⏳"
+  #   [notifications.messages.config_reloaded]
+  #     title = ""
+  #     body = "🔧"
+
+# Backend explanations:
+# - "ydotool": Uses ydotool (requires ydotoold daemon running). Most compatible with Chromium/Electron apps.
+# - "wtype": Uses wtype for Wayland. May have issues with some Chromium-based apps.
+# - "clipboard": Copies text to clipboard only (most reliable, but requires manual paste).
+#
+# The backends are tried in order. First successful one wins.
+# Example configurations:
+#   backends = ["clipboard"]                      # Clipboard only (safest)
+#   backends = ["wtype", "clipboard"]             # wtype with clipboard fallback
+#   backends = ["ydotool", "wtype", "clipboard"]  # Full fallback chain (default)
 #
 # Provider explanations:
 # - "openai": OpenAI Whisper API (cloud-based, requires OPENAI_API_KEY)
@@ -334,6 +493,8 @@ func SaveDefaultConfig() error {
 #     Models: whisper-large-v3 or whisper-large-v3-turbo
 # - "groq-translation": Groq Whisper API for translation to English (always outputs English text)
 #     Models: whisper-large-v3 only (turbo not supported for translation)
+# - "mistral-transcription": Mistral Voxtral API (excellent for European languages, requires MISTRAL_API_KEY)
+#     Models: voxtral-mini-latest or voxtral-mini-2507
 # - "whisper-cpp": Local whisper.cpp server (requires server_url, no API key needed)
 #     Set server_url to your local server endpoint (e.g., "http://192.168.10.37:8025/inference")
 #

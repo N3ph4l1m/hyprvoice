@@ -32,19 +32,15 @@ type Daemon struct {
 
 func New() (*Daemon, error) {
 	configMgr, err := config.NewManager()
-
-	conf := configMgr.GetConfig()
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config manager: %w", err)
 	}
 
+	conf := configMgr.GetConfig()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	n := notify.GetNotifierBasedOnConfig(conf)
-
 	d := &Daemon{
-		notifier:  n,
+		notifier:  notify.NewNotifier(conf.Notifications.Type, conf.Notifications.Messages.Resolve()),
 		configMgr: configMgr,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -57,11 +53,13 @@ func (d *Daemon) onConfigReload() {
 	log.Printf("Config reloaded, restarting pipeline")
 	d.stopPipeline()
 
-	d.notifier.Notify("Hyprvoice", "Config Reloaded")
+	conf := d.configMgr.GetConfig()
 
 	d.mu.Lock()
-	d.notifier = notify.GetNotifierBasedOnConfig(d.configMgr.GetConfig())
+	d.notifier = notify.NewNotifier(conf.Notifications.Type, conf.Notifications.Messages.Resolve())
 	d.mu.Unlock()
+
+	d.notifier.Send(notify.MsgConfigReloaded)
 }
 
 func (d *Daemon) status() pipeline.Status {
@@ -180,22 +178,22 @@ func (d *Daemon) handle(c net.Conn) {
 }
 
 func (d *Daemon) toggle() {
+	conf := d.configMgr.GetConfig()
 	switch d.status() {
 	case pipeline.Idle:
-		config := d.configMgr.GetConfig()
-		p := pipeline.New(config)
+		p := pipeline.New(conf)
 		p.Run(d.ctx)
 
 		d.mu.Lock()
 		d.pipeline = p
 		d.mu.Unlock()
 
-		go d.notifier.Notify("Hyprvoice", "Recording Started")
+		go d.notifier.Send(notify.MsgRecordingStarted)
 		go d.monitorPipelineErrors(p)
 
 	case pipeline.Recording:
 		d.stopPipeline()
-		go d.notifier.Error("Recording Aborted")
+		go d.notifier.Send(notify.MsgRecordingAborted)
 
 	case pipeline.Transcribing:
 		d.mu.RLock()
@@ -207,11 +205,11 @@ func (d *Daemon) toggle() {
 		} else {
 			d.mu.RUnlock()
 		}
-		go d.notifier.Notify("Hyprvoice", "Recording Ended... Transcribing")
+		go d.notifier.Send(notify.MsgTranscribing)
 
 	case pipeline.Injecting:
 		d.stopPipeline()
-		go d.notifier.Error("Injection Aborted")
+		go d.notifier.Send(notify.MsgInjectionAborted)
 	}
 }
 
@@ -221,7 +219,7 @@ func (d *Daemon) cancelPipeline() {
 		log.Printf("Daemon: Cancel requested but pipeline is idle, ignoring")
 	default:
 		d.stopPipeline()
-		go d.notifier.Notify("Hyprvoice", "Operation Cancelled")
+		go d.notifier.Send(notify.MsgOperationCancelled)
 	}
 }
 
